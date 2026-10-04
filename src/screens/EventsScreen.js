@@ -483,4 +483,4 @@ const styles = StyleSheet.create({
   modalBtnRow: { flexDirection: 'row', justifyContent: 'space-between', marginTop: 16, gap: 10 },
   modalActionBtn: { flex: 1, paddingVertical: 10, borderRadius: 8, alignItems: 'center' },
   btnText: { color: '#FFF', fontWeight: 'bold', fontSize: 13 }
-});
+});  
