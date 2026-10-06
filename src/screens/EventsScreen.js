@@ -8,15 +8,23 @@ import {
   Modal,
   TextInput,
   Alert,
-  SafeAreaView,
-  Share
+  SafeAreaView
 } from 'react-native';
+import * as Print from 'expo-print';
+
+// Para hindi masira ang PDF kung may special characters (<, >, &) ang tinype
+const escapeHtml = (value) =>
+  String(value == null ? '' : value)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;');
 
 export default function EventsScreen() {
   const [events, setEvents] = useState([
     {
       id: '1',
-      title: 'Youth Fellowship Night',
+      title: 'IKONEK CELEBRATION',
       category: 'Upcoming',
       date: 'Sat, Oct 12, 2026 • 6:00 PM - 8:30 PM',
       location: 'Main Sanctuary',
@@ -27,7 +35,7 @@ export default function EventsScreen() {
     },
     {
       id: '2',
-      title: 'Community Outreach',
+      title: 'IKONEK CELEBRATION',
       category: 'Special',
       date: 'Sat, Oct 26, 2026 • 8:00 AM - 12:00 PM',
       location: 'Nursery Masbate City',
@@ -38,7 +46,7 @@ export default function EventsScreen() {
     },
     {
       id: '3',
-      title: 'Worship & Prayer Retreat',
+      title: 'IKONEK CELEBRATION',
       category: 'Annual',
       date: 'Nov 15 - 17, 2026 • Whole Day',
       location: 'Camp Center',
@@ -50,7 +58,7 @@ export default function EventsScreen() {
   ]);
 
   const [selectedMonth, setSelectedMonth] = useState('All');
-  
+
   // States para sa Details Modal (Flow & Attendees)
   const [modalVisible, setModalVisible] = useState(false);
   const [selectedEvent, setSelectedEvent] = useState(null);
@@ -80,7 +88,7 @@ export default function EventsScreen() {
       if (ev.id === id) {
         const newStatus = !ev.reminderSet;
         Alert.alert(
-          newStatus ? "Reminder Set" : "Reminder Removed", 
+          newStatus ? "Reminder Set" : "Reminder Removed",
           newStatus ? `You will be reminded for "${ev.title}".` : `Reminder cancelled for "${ev.title}".`
         );
         return { ...ev, reminderSet: newStatus };
@@ -154,43 +162,137 @@ export default function EventsScreen() {
 
     setEvents([newEventObj, ...events]);
     setAddModalVisible(false);
-    
+
     // Clear inputs
     setNewTitle('');
     setNewDate('');
     setNewLocation('');
     setNewFlow('');
-    
+
     Alert.alert("Success", "New event successfully added!");
   };
 
-  // 🖨️ Function para i-Print / i-Share ang Flow of Program
+  // 🗑 DELETE: may kumpirmasyon muna bago tuluyang tanggalin ang event
+  const handleDeleteEvent = (event) => {
+    Alert.alert(
+      "Delete Event",
+      `Are you sure you want to delete "${event.title}" (${event.date})?`,
+      [
+        { text: "Cancel", style: "cancel" },
+        {
+          text: "Delete",
+          style: "destructive",
+          onPress: () => {
+            setEvents(prev => prev.filter(ev => ev.id !== event.id));
+            // Isara ang mga modal kung ito ang kasalukuyang nakabukas
+            if (selectedEvent && selectedEvent.id === event.id) {
+              setModalVisible(false);
+              setSelectedEvent(null);
+            }
+            if (editingEvent && editingEvent.id === event.id) {
+              setEditModalVisible(false);
+              setEditingEvent(null);
+            }
+          }
+        }
+      ]
+    );
+  };
+
+  // 🖨️ AUTOMATIC PRINT (PDF): gagawa ng PDF ng Flow of Program at bubuksan agad
+  // ang print screen. Dito pwede mong i-print o i-"Save as PDF".
   const handlePrintFlow = async (event) => {
     try {
-      const messageToPrint = `=== CHURCH EVENT PROGRAM ===\nEvent: ${event.title}\nCategory: ${event.category}\nDate: ${event.date}\nLocation: ${event.location}\n\n[FLOW OF PROGRAM]\n${event.flowOfProgram}\n\n[SIGNED-UP ATTENDEES]\n${event.signedUp.length > 0 ? event.signedUp.join(', ') : 'No attendees yet.'}\n==========================`;
-      
-      await Share.share({
-        message: messageToPrint,
-        title: `${event.title} - Program Flow`,
-      });
+      const flowLines = String(event.flowOfProgram || '')
+        .split('\n')
+        .filter(line => line.trim() !== '');
+
+      const flowHtml = flowLines.length > 0
+        ? flowLines.map((line, i) => `
+            <tr>
+              <td class="num">${i + 1}</td>
+              <td>${escapeHtml(line)}</td>
+            </tr>
+          `).join('')
+        : `<tr><td colspan="2" class="empty">No flow of program provided yet.</td></tr>`;
+
+      const attendees = event.signedUp || [];
+      const attendeesHtml = attendees.length > 0
+        ? attendees.map((name, i) => `
+            <tr>
+              <td class="num">${i + 1}</td>
+              <td>${escapeHtml(name)}</td>
+            </tr>
+          `).join('')
+        : `<tr><td colspan="2" class="empty">No one has signed yet.</td></tr>`;
+
+      const htmlContent = `
+        <html>
+          <head>
+            <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+            <style>
+              body { font-family: Helvetica, Arial, sans-serif; padding: 28px; color: #1E293B; }
+              h1 { text-align: center; margin: 0 0 4px 0; font-size: 22px; }
+              .subtitle { text-align: center; font-size: 12px; color: #64748B; margin-bottom: 20px; font-weight: bold; }
+              .details { border: 1px solid #CBD5E1; border-radius: 6px; padding: 12px 14px; margin-bottom: 20px; font-size: 13px; line-height: 1.7; }
+              .details b { display: inline-block; width: 90px; color: #0F172A; }
+              h3 { margin: 18px 0 6px 0; font-size: 15px; color: #0369A1; }
+              table { width: 100%; border-collapse: collapse; }
+              th, td { border: 1px solid #CBD5E1; padding: 8px 10px; text-align: left; font-size: 13px; }
+              th { background-color: #0F172A; color: #FFF; }
+              td.num { width: 36px; text-align: center; color: #64748B; }
+              td.empty { text-align: center; color: #64748B; }
+              tr:nth-child(even) { background-color: #F8FAFC; }
+              .footer { margin-top: 24px; text-align: center; font-size: 11px; color: #94A3B8; }
+            </style>
+          </head>
+          <body>
+            <h1>${escapeHtml(event.title)}</h1>
+            <div class="subtitle">CHURCH EVENT PROGRAM</div>
+
+            <div class="details">
+              <div><b>Category:</b> ${escapeHtml(event.category)}</div>
+              <div><b>Date &amp; Time:</b> ${escapeHtml(event.date)}</div>
+              <div><b>Location:</b> ${escapeHtml(event.location)}</div>
+            </div>
+
+            <h3>Flow of Program</h3>
+            <table>
+              <thead><tr><th>#</th><th>Program</th></tr></thead>
+              <tbody>${flowHtml}</tbody>
+            </table>
+
+            <h3>Signed (${attendees.length})</h3>
+            <table>
+              <thead><tr><th>#</th><th>Name</th></tr></thead>
+              <tbody>${attendeesHtml}</tbody>
+            </table>
+
+            <div class="footer">IKONEK - Printed on ${escapeHtml(new Date().toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' }))}</div>
+          </body>
+        </html>
+      `;
+
+      // Bubukas agad ang print / Save as PDF screen
+      await Print.printAsync({ html: htmlContent });
     } catch (error) {
-      Alert.alert("Error", "Failed to print or share program flow.");
+      Alert.alert("Error", "Failed to print the program flow.");
     }
   };
 
-  const filteredEvents = selectedMonth === 'All' 
-    ? events 
+  const filteredEvents = selectedMonth === 'All'
+    ? events
     : events.filter(ev => ev.month.toLowerCase() === selectedMonth.toLowerCase());
 
   return (
     <SafeAreaView style={styles.container}>
       <ScrollView contentContainerStyle={styles.scrollContainer} showsVerticalScrollIndicator={false}>
-        
+
         {/* Header & Add Event Button Row */}
         <View style={styles.topHeaderRow}>
           <Text style={styles.headerTitle}>Church Events 🎉</Text>
-          <TouchableOpacity 
-            style={styles.addEventTopBtn} 
+          <TouchableOpacity
+            style={styles.addEventTopBtn}
             onPress={() => setAddModalVisible(true)}
           >
             <Text style={styles.addEventTopBtnText}>+ Add Event</Text>
@@ -200,8 +302,8 @@ export default function EventsScreen() {
         {/* Filter Buttons bawat buwan */}
         <ScrollView horizontal showsHorizontalScrollIndicator={false} style={styles.filterContainer}>
           {['All', 'October', 'November', 'December'].map((m) => (
-            <TouchableOpacity 
-              key={m} 
+            <TouchableOpacity
+              key={m}
               style={[styles.filterBtn, selectedMonth === m && styles.activeFilterBtn]}
               onPress={() => setSelectedMonth(m)}
             >
@@ -228,8 +330,8 @@ export default function EventsScreen() {
 
               {/* Action Buttons Container */}
               <View style={styles.actionRow}>
-                <TouchableOpacity 
-                  style={[styles.reminderBtn, item.reminderSet && styles.activeReminderBtn]} 
+                <TouchableOpacity
+                  style={[styles.reminderBtn, item.reminderSet && styles.activeReminderBtn]}
                   onPress={() => handleToggleReminder(item.id)}
                 >
                   <Text style={styles.reminderBtnText}>
@@ -237,25 +339,32 @@ export default function EventsScreen() {
                   </Text>
                 </TouchableOpacity>
 
-                <TouchableOpacity 
-                  style={styles.detailsBtn} 
+                <TouchableOpacity
+                  style={styles.detailsBtn}
                   onPress={() => handleOpenDetails(item)}
                 >
                   <Text style={styles.btnTextSmall}>📋 Details</Text>
                 </TouchableOpacity>
 
-                <TouchableOpacity 
-                  style={styles.printBtn} 
+                <TouchableOpacity
+                  style={styles.printBtn}
                   onPress={() => handlePrintFlow(item)}
                 >
-                  <Text style={styles.btnTextSmall}>🖨️ Print</Text>
+                  <Text style={styles.btnTextSmall}>🖨️ Print PDF</Text>
                 </TouchableOpacity>
 
-                <TouchableOpacity 
-                  style={styles.editBtn} 
+                <TouchableOpacity
+                  style={styles.editBtn}
                   onPress={() => handleOpenEdit(item)}
                 >
                   <Text style={styles.btnTextSmall}>✏️ Edit</Text>
+                </TouchableOpacity>
+
+                <TouchableOpacity
+                  style={styles.deleteBtn}
+                  onPress={() => handleDeleteEvent(item)}
+                >
+                  <Text style={styles.btnTextSmall}>🗑 Delete</Text>
                 </TouchableOpacity>
               </View>
             </View>
@@ -265,38 +374,50 @@ export default function EventsScreen() {
       </ScrollView>
 
       {/* MODAL PARA SA FLOW OF PROGRAM AT ATTENDEES */}
-      <Modal visible={modalVisible} animationType="slide" transparent={true}>
+      <Modal
+        visible={modalVisible}
+        animationType="slide"
+        transparent={true}
+        onRequestClose={() => setModalVisible(false)}
+      >
         <View style={styles.modalOverlay}>
           <View style={styles.modalContent}>
             {selectedEvent && (
               <>
                 <Text style={styles.modalTitle}>{selectedEvent.title}</Text>
-                
+
                 <Text style={styles.sectionHeader}>📜 Flow of Program:</Text>
                 <View style={styles.boxContent}>
                   <Text style={styles.boxText}>{selectedEvent.flowOfProgram}</Text>
                 </View>
 
-                <Text style={styles.sectionHeader}>👥 Signed-Up Attendees ({selectedEvent.signedUp.length}):</Text>
+                <Text style={styles.sectionHeader}>👥 Signed ({selectedEvent.signedUp.length}):</Text>
                 <View style={styles.boxContent}>
                   {selectedEvent.signedUp.length > 0 ? (
                     selectedEvent.signedUp.map((name, index) => (
                       <Text key={index} style={styles.boxText}>• {name}</Text>
                     ))
                   ) : (
-                    <Text style={styles.boxText}>No attendees signed up yet.</Text>
+                    <Text style={styles.boxText}>No one has signed yet.</Text>
                   )}
                 </View>
 
-                <TouchableOpacity 
-                  style={styles.printModalBtn} 
+                <TouchableOpacity
+                  style={styles.printModalBtn}
                   onPress={() => handlePrintFlow(selectedEvent)}
                 >
-                  <Text style={styles.btnText}>🖨️ Print / Export Flow</Text>
+                  <Text style={styles.btnText}>🖨️ Print PDF</Text>
                 </TouchableOpacity>
 
-                <TouchableOpacity 
-                  style={styles.closeModalBtn} 
+                <TouchableOpacity
+                  style={[styles.closeModalBtn, { backgroundColor: '#B91C1C' }]}
+                  onPress={() => handleDeleteEvent(selectedEvent)}
+                >
+                  <Text style={styles.btnText}>🗑 Delete Event</Text>
+                </TouchableOpacity>
+
+                <TouchableOpacity
+                  style={styles.closeModalBtn}
                   onPress={() => setModalVisible(false)}
                 >
                   <Text style={styles.btnText}>Close</Text>
@@ -308,67 +429,72 @@ export default function EventsScreen() {
       </Modal>
 
       {/* MODAL PARA SA ADD EVENT */}
-      <Modal visible={addModalVisible} animationType="fade" transparent={true}>
+      <Modal
+        visible={addModalVisible}
+        animationType="fade"
+        transparent={true}
+        onRequestClose={() => setAddModalVisible(false)}
+      >
         <View style={styles.modalOverlay}>
           <View style={styles.modalContent}>
             <Text style={styles.modalTitle}>Add New Event</Text>
 
             <Text style={styles.label}>Event Title</Text>
-            <TextInput 
-              style={styles.input} 
-              placeholder="e.g. Youth Camp" 
+            <TextInput
+              style={styles.input}
+              placeholder="e.g. IKONEK CELEBRATION"
               placeholderTextColor="#64748B"
-              value={newTitle} 
-              onChangeText={setNewTitle} 
+              value={newTitle}
+              onChangeText={setNewTitle}
             />
 
             <Text style={styles.label}>Date & Time</Text>
-            <TextInput 
-              style={styles.input} 
-              placeholder="e.g. Sat, Dec 10 • 5:00 PM" 
+            <TextInput
+              style={styles.input}
+              placeholder="e.g. Sat, Dec 10 • 5:00 PM"
               placeholderTextColor="#64748B"
-              value={newDate} 
-              onChangeText={setNewDate} 
+              value={newDate}
+              onChangeText={setNewDate}
             />
 
             <Text style={styles.label}>Location</Text>
-            <TextInput 
-              style={styles.input} 
-              placeholder="e.g. Main Sanctuary" 
+            <TextInput
+              style={styles.input}
+              placeholder="e.g. Main Sanctuary"
               placeholderTextColor="#64748B"
-              value={newLocation} 
-              onChangeText={setNewLocation} 
+              value={newLocation}
+              onChangeText={setNewLocation}
             />
 
             <Text style={styles.label}>Month (October / November / December)</Text>
-            <TextInput 
-              style={styles.input} 
-              placeholder="October" 
+            <TextInput
+              style={styles.input}
+              placeholder="October"
               placeholderTextColor="#64748B"
-              value={newMonth} 
-              onChangeText={setNewMonth} 
+              value={newMonth}
+              onChangeText={setNewMonth}
             />
 
             <Text style={styles.label}>Flow of Program</Text>
-            <TextInput 
-              style={[styles.input, { height: 70 }]} 
-              multiline 
-              placeholder="Enter program flow..." 
+            <TextInput
+              style={[styles.input, { height: 70 }]}
+              multiline
+              placeholder="Enter program flow..."
               placeholderTextColor="#64748B"
-              value={newFlow} 
-              onChangeText={setNewFlow} 
+              value={newFlow}
+              onChangeText={setNewFlow}
             />
 
             <View style={styles.modalBtnRow}>
-              <TouchableOpacity 
-                style={[styles.modalActionBtn, { backgroundColor: '#334155' }]} 
+              <TouchableOpacity
+                style={[styles.modalActionBtn, { backgroundColor: '#334155' }]}
                 onPress={() => setAddModalVisible(false)}
               >
                 <Text style={styles.btnText}>Cancel</Text>
               </TouchableOpacity>
 
-              <TouchableOpacity 
-                style={[styles.modalActionBtn, { backgroundColor: '#2563EB' }]} 
+              <TouchableOpacity
+                style={[styles.modalActionBtn, { backgroundColor: '#2563EB' }]}
                 onPress={handleAddEvent}
               >
                 <Text style={styles.btnText}>Save Event</Text>
@@ -379,57 +505,62 @@ export default function EventsScreen() {
       </Modal>
 
       {/* MODAL PARA SA EDIT EVENT */}
-      <Modal visible={editModalVisible} animationType="fade" transparent={true}>
+      <Modal
+        visible={editModalVisible}
+        animationType="fade"
+        transparent={true}
+        onRequestClose={() => setEditModalVisible(false)}
+      >
         <View style={styles.modalOverlay}>
           <View style={styles.modalContent}>
             <Text style={styles.modalTitle}>Edit Event</Text>
 
             <Text style={styles.label}>Event Title</Text>
-            <TextInput 
-              style={styles.input} 
-              value={editTitle} 
-              onChangeText={setEditTitle} 
+            <TextInput
+              style={styles.input}
+              value={editTitle}
+              onChangeText={setEditTitle}
             />
 
             <Text style={styles.label}>Date & Time</Text>
-            <TextInput 
-              style={styles.input} 
-              value={editDate} 
-              onChangeText={setEditDate} 
+            <TextInput
+              style={styles.input}
+              value={editDate}
+              onChangeText={setEditDate}
             />
 
             <Text style={styles.label}>Location</Text>
-            <TextInput 
-              style={styles.input} 
-              value={editLocation} 
-              onChangeText={setEditLocation} 
+            <TextInput
+              style={styles.input}
+              value={editLocation}
+              onChangeText={setEditLocation}
             />
 
             <Text style={styles.label}>Month</Text>
-            <TextInput 
-              style={styles.input} 
-              value={editMonth} 
-              onChangeText={setEditMonth} 
+            <TextInput
+              style={styles.input}
+              value={editMonth}
+              onChangeText={setEditMonth}
             />
 
             <Text style={styles.label}>Flow of Program</Text>
-            <TextInput 
-              style={[styles.input, { height: 70 }]} 
-              multiline 
-              value={editFlow} 
-              onChangeText={setEditFlow} 
+            <TextInput
+              style={[styles.input, { height: 70 }]}
+              multiline
+              value={editFlow}
+              onChangeText={setEditFlow}
             />
 
             <View style={styles.modalBtnRow}>
-              <TouchableOpacity 
-                style={[styles.modalActionBtn, { backgroundColor: '#334155' }]} 
+              <TouchableOpacity
+                style={[styles.modalActionBtn, { backgroundColor: '#334155' }]}
                 onPress={() => setEditModalVisible(false)}
               >
                 <Text style={styles.btnText}>Cancel</Text>
               </TouchableOpacity>
 
-              <TouchableOpacity 
-                style={[styles.modalActionBtn, { backgroundColor: '#2563EB' }]} 
+              <TouchableOpacity
+                style={[styles.modalActionBtn, { backgroundColor: '#2563EB' }]}
                 onPress={handleSaveEdit}
               >
                 <Text style={styles.btnText}>Save Changes</Text>
@@ -469,6 +600,7 @@ const styles = StyleSheet.create({
   detailsBtn: { flex: 1, backgroundColor: '#475569', paddingVertical: 8, borderRadius: 6, alignItems: 'center', justifyContent: 'center' },
   printBtn: { flex: 1, backgroundColor: '#0D9488', paddingVertical: 8, borderRadius: 6, alignItems: 'center', justifyContent: 'center' },
   editBtn: { flex: 1, backgroundColor: '#D97706', paddingVertical: 8, borderRadius: 6, alignItems: 'center', justifyContent: 'center' },
+  deleteBtn: { flex: 1, backgroundColor: '#B91C1C', paddingVertical: 8, borderRadius: 6, alignItems: 'center', justifyContent: 'center' },
   btnTextSmall: { color: '#FFF', fontSize: 10, fontWeight: 'bold' },
   modalOverlay: { flex: 1, backgroundColor: 'rgba(0,0,0,0.7)', justifyContent: 'center', padding: 20 },
   modalContent: { backgroundColor: '#1E293B', borderRadius: 12, padding: 20, borderWidth: 1, borderColor: '#334155' },
@@ -483,4 +615,4 @@ const styles = StyleSheet.create({
   modalBtnRow: { flexDirection: 'row', justifyContent: 'space-between', marginTop: 16, gap: 10 },
   modalActionBtn: { flex: 1, paddingVertical: 10, borderRadius: 8, alignItems: 'center' },
   btnText: { color: '#FFF', fontWeight: 'bold', fontSize: 13 }
-});  
+});

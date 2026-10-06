@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import {
   StyleSheet,
   View,
@@ -21,6 +21,17 @@ import AsyncStorage from '@react-native-async-storage/async-storage';
 
 const { width, height } = Dimensions.get('window');
 
+// Alisin ang doble sa History: iisa lang ang pangalan kada petsa (yung pinakabago ang tinitira)
+const dedupeHistory = (list) => {
+  const seen = new Set();
+  return list.filter(log => {
+    const key = `${(log.name || '').trim().toLowerCase()}|${log.date}`;
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+};
+
 export default function AttendanceScreen() {
   const [isDarkMode, setIsDarkMode] = useState(true);
   const [activeTab, setActiveTab] = useState('All');
@@ -31,6 +42,7 @@ export default function AttendanceScreen() {
   const [newbieList, setNewbieList] = useState([]);
   const [eventsList, setEventsList] = useState([]);
   const [attendanceHistory, setAttendanceHistory] = useState([]);
+  const [historySearch, setHistorySearch] = useState('');
 
   // Modal States
   const [modalVisible, setModalVisible] = useState(false);
@@ -42,7 +54,7 @@ export default function AttendanceScreen() {
   const [age, setAge] = useState('');
   const [birthday, setBirthday] = useState('');
   const [dateFilledOut, setDateFilledOut] = useState(new Date().toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' }));
-  
+
   const [datePickerVisible, setDatePickerVisible] = useState(false);
   const [selectedDateObj, setSelectedDateObj] = useState(new Date());
 
@@ -57,6 +69,30 @@ export default function AttendanceScreen() {
   const [selectedMember, setSelectedMember] = useState(null);
   const [hasCameraPermission, setHasCameraPermission] = useState(null);
 
+  // Lock para isang scan = isang check lang (iwas double-scan)
+  const scanLockRef = useRef(false);
+
+  // LEADERS
+  const [leadersList, setLeadersList] = useState([]);
+  const [leadersModalVisible, setLeadersModalVisible] = useState(false);
+  const [leaderFormVisible, setLeaderFormVisible] = useState(false);
+  const [editLeaderId, setEditLeaderId] = useState(null);
+  const [lName, setLName] = useState('');
+  const [lSex, setLSex] = useState('');
+  const [lAge, setLAge] = useState('');
+  const [lBirthday, setLBirthday] = useState('');
+  const [lAddress, setLAddress] = useState('');
+  const [lContact, setLContact] = useState('');
+  const [leaderDatePickerVisible, setLeaderDatePickerVisible] = useState(false);
+  const [lSelectedDate, setLSelectedDate] = useState(new Date());
+
+  const [leaderSearch, setLeaderSearch] = useState('');
+  const [expandedLeaders, setExpandedLeaders] = useState({}); // { [leaderId]: true/false }
+
+  // Para sa pag-add/edit ng member galing sa Leaders screen
+  const [formForceRegular, setFormForceRegular] = useState(false);
+  const [returnToLeaders, setReturnToLeaders] = useState(false);
+
   const isBirthdayToday = (birthdayStr) => {
     if (!birthdayStr) return false;
     const today = new Date();
@@ -66,8 +102,8 @@ export default function AttendanceScreen() {
     const lowerDate = birthdayStr.toLowerCase();
     const isThisMonth = lowerDate.includes(currentMonth);
     const isToday = isThisMonth && (
-      lowerDate.includes(` ${currentDay},`) || 
-      lowerDate.includes(` ${currentDay} `) || 
+      lowerDate.includes(` ${currentDay},`) ||
+      lowerDate.includes(` ${currentDay} `) ||
       lowerDate.endsWith(` ${currentDay}`)
     );
     return isToday;
@@ -85,11 +121,15 @@ export default function AttendanceScreen() {
     return `${baseAge}`;
   };
 
+  // Petsa ngayong araw (parehong format ng History logs)
+  const getTodayDateStr = () =>
+    new Date().toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' });
+
+  // LOAD DATA pag binuksan ang app
   useEffect(() => {
     (async () => {
-      const { status } = await Camera.requestCameraPermissionsAsync();
-      setHasCameraPermission(status === 'granted');
-
+      // I-load muna ang naka-save na data (leaders, members, history) bago ang camera permission,
+      // para hindi mawala ang data kahit pumalya ang permission request.
       try {
         const savedRegulars = await AsyncStorage.getItem('@regular_list');
         const savedNewbies = await AsyncStorage.getItem('@newbie_list');
@@ -98,12 +138,84 @@ export default function AttendanceScreen() {
         const savedDarkMode = await AsyncStorage.getItem('@dark_mode');
 
         if (savedRegulars !== null) setRegularList(JSON.parse(savedRegulars));
-        if (savedNewbies !== null) setNewbieList(JSON.parse(savedNewbies));
+        if (savedNewbies !== null) {
+          let newbies = JSON.parse(savedNewbies);
+
+          // ONE-TIME FIX: lahat ng nasa Second Timer ngayon ay ibabalik sa First Timer
+          // (1 / 4) at naka-check na (✅ Present) sa All list. Isang beses lang tatakbo.
+          const fixDone = await AsyncStorage.getItem('@fix_second_to_first_v1');
+          if (fixDone === null) {
+            let movedCount = 0;
+            newbies = newbies.map(n => {
+              if (n.presentCountNumber === 2) {
+                movedCount += 1;
+                return {
+                  ...n,
+                  presentCountNumber: 1,
+                  presentCount: '1 / 4',
+                  status: 'First Timer',
+                  isPresent: true,
+                };
+              }
+              return n;
+            });
+            await AsyncStorage.setItem('@newbie_list', JSON.stringify(newbies));
+            await AsyncStorage.setItem('@fix_second_to_first_v1', 'done');
+            if (movedCount > 0) {
+              Alert.alert("Fixed ✅", `${movedCount} member(s) na dating Second Timer ay ibinalik sa First Timer at naka-check na sa All list.`);
+            }
+          }
+
+          // ONE-TIME FIX #2: lahat ng nasa First Timer ay magsisimula sa 0 / 4.
+          // (Hindi gagalawin ang Second/Third Timer, at hindi rin ang ✅ Present nila.)
+          const zeroFixDone = await AsyncStorage.getItem('@fix_first_timer_zero_v1');
+          if (zeroFixDone === null) {
+            let resetCount = 0;
+            newbies = newbies.map(n => {
+              if ((n.presentCountNumber || 0) <= 1) {
+                resetCount += 1;
+                return {
+                  ...n,
+                  presentCountNumber: 0,
+                  presentCount: '0 / 4',
+                  status: 'First Timer',
+                };
+              }
+              return n;
+            });
+            await AsyncStorage.setItem('@newbie_list', JSON.stringify(newbies));
+            await AsyncStorage.setItem('@fix_first_timer_zero_v1', 'done');
+            if (resetCount > 0) {
+              Alert.alert("Reset ✅", `${resetCount} First Timer(s) ay nasa 0 / 4 na.`);
+            }
+          }
+
+          setNewbieList(newbies);
+        }
+
         if (savedEvents !== null) setEventsList(JSON.parse(savedEvents));
-        if (savedHistory !== null) setAttendanceHistory(JSON.parse(savedHistory));
+
+        const savedLeaders = await AsyncStorage.getItem('@leaders_list');
+        if (savedLeaders !== null) setLeadersList(JSON.parse(savedLeaders));
+        if (savedHistory !== null) {
+          const parsed = JSON.parse(savedHistory);
+          const cleaned = dedupeHistory(parsed);
+          setAttendanceHistory(cleaned);
+          if (cleaned.length !== parsed.length) {
+            await AsyncStorage.setItem('@attendance_history', JSON.stringify(cleaned));
+          }
+        }
         if (savedDarkMode !== null) setIsDarkMode(JSON.parse(savedDarkMode));
       } catch (e) {
         console.log("Error loading data", e);
+      }
+
+      try {
+        const { status } = await Camera.requestCameraPermissionsAsync();
+        setHasCameraPermission(status === 'granted');
+      } catch (e) {
+        console.log("Camera permission error", e);
+        setHasCameraPermission(false);
       }
     })();
   }, []);
@@ -119,12 +231,13 @@ export default function AttendanceScreen() {
     }
   };
 
-  const recordAttendanceLog = (member) => {
-    const currentDate = new Date().toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' });
+  const buildAttendanceLog = (member) => {
+    const currentDate = getTodayDateStr();
     const currentTime = new Date().toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit' });
-    
-    const newLog = {
+
+    return {
       id: Date.now().toString() + Math.random(),
+      memberId: member.id,
       name: member.name,
       status: member.status,
       sex: member.sex || 'N/A',
@@ -136,12 +249,25 @@ export default function AttendanceScreen() {
       time: currentTime,
       photo: member.photo || null,
     };
+  };
 
-    setAttendanceHistory(prevHistory => {
-      const updatedHistory = [newLog, ...prevHistory];
-      saveDataToStorage(null, null, null, updatedHistory);
-      return updatedHistory;
-    });
+  // Pagkatapos ng print: lahat ng Present sa All list ay mapupunta sa History,
+  // tapos ma-clear ang Present sa All list para ready na sa susunod na attendance.
+  const archiveAndClearAttendance = () => {
+    const presentMembers = [...regularList, ...newbieList].filter(m => m.isPresent);
+    if (presentMembers.length === 0) return;
+
+    const newLogs = presentMembers.map(buildAttendanceLog);
+    const updatedHistory = dedupeHistory([...newLogs, ...attendanceHistory]);
+    const updatedRegulars = regularList.map(r => ({ ...r, isPresent: false }));
+    const updatedNewbies = newbieList.map(n => ({ ...n, isPresent: false }));
+
+    setAttendanceHistory(updatedHistory);
+    setRegularList(updatedRegulars);
+    setNewbieList(updatedNewbies);
+    saveDataToStorage(updatedRegulars, updatedNewbies, null, updatedHistory);
+
+    Alert.alert("Saved to History ✅", `${newLogs.length} attendance record(s) moved to History. Ready for the next attendance.`);
   };
 
   const handleTakePhoto = async () => {
@@ -187,19 +313,15 @@ export default function AttendanceScreen() {
     return 'First Timer';
   };
 
+  // TIMERS: bawat tap sa Present = dagdag 1 sa count (2/4 -> 3/4 -> 4/4).
+  // Awtomatikong lilipat sa susunod na tab (Second -> Third Timer), at Regular pag 4/4.
   const handleTogglePresentNewbie = (id) => {
-    let targetMember = null;
     let promotedMember = null;
 
     const updatedNewbies = newbieList.map(item => {
       if (item.id === id) {
-        const newIsPresent = !item.isPresent;
-        let newCountNum = item.presentCountNumber || 0;
-        if (newIsPresent) {
-          newCountNum = Math.min(4, newCountNum + 1);
-        } else {
-          newCountNum = Math.max(0, newCountNum - 1);
-        }
+        const newIsPresent = true;
+        const newCountNum = Math.min(4, (item.presentCountNumber || 0) + 1);
 
         const updatedItem = {
           ...item,
@@ -208,10 +330,6 @@ export default function AttendanceScreen() {
           presentCount: `${newCountNum} / 4`,
           status: getNewbieStatusLabel(newCountNum)
         };
-
-        if (newIsPresent) {
-          targetMember = updatedItem;
-        }
 
         if (newCountNum >= 4) {
           promotedMember = {
@@ -224,7 +342,7 @@ export default function AttendanceScreen() {
             cellLeader: 'N/A',
             dateFilledOut: updatedItem.dateFilledOut,
             status: 'Regular',
-            isPresent: false,
+            isPresent: true,
             photo: updatedItem.photo
           };
           return null;
@@ -243,55 +361,102 @@ export default function AttendanceScreen() {
       Alert.alert("Congratulations! 🎉", `${promotedMember.name} has completed 4/4 attendance! Promoted to Regular Member.`);
     }
 
-    if (targetMember) {
-      recordAttendanceLog(targetMember);
-    }
-
     saveDataToStorage(updatedRegulars, updatedNewbies, null, null);
   };
 
-  const handleTogglePresentRegular = (id) => {
-    let targetMember = null;
-    const updatedRegulars = regularList.map(item => {
-      if (item.id === id) {
-        const nextState = !item.isPresent;
-        const updatedItem = { ...item, isPresent: nextState };
-        if (nextState) {
-          targetMember = updatedItem;
-        }
-        return updatedItem;
-      }
-      return item;
-    });
+  // REGULAR: tap Mark Present -> automatic na naka-check (✅ Present) sa All list.
+  // Walang magbabago sa Regular tab. Mare-reset ito pagkatapos i-print ang All list.
+  const handleMarkPresentRegular = (id) => {
+    const member = regularList.find(item => item.id === id);
+    if (!member) return;
 
-    setRegularList(updatedRegulars);
-    if (targetMember) {
-      recordAttendanceLog(targetMember);
-    }
-    saveDataToStorage(updatedRegulars, null, null, null);
-  };
-
-  const handleBarCodeScanned = ({ data }) => {
-    setScannerModalVisible(false);
-    let foundMember = null;
-
-    const updatedRegulars = regularList.map(item => {
-      if (item.id === data || item.name.toLowerCase() === data.toLowerCase()) {
-        foundMember = { ...item, isPresent: true };
-        return foundMember;
-      }
-      return item;
-    });
-
-    if (foundMember) {
-      setRegularList(updatedRegulars);
-      recordAttendanceLog(foundMember);
-      saveDataToStorage(updatedRegulars, null, null, null);
-      Alert.alert("Success! 🎉", `${foundMember.name} has been marked as Present ✅`);
+    if (member.isPresent) {
+      Alert.alert("Already Present", `${member.name} is already marked Present in the All list.`);
       return;
     }
 
-    Alert.alert("Not Found", `No matching regular member found for QR Data: "${data}"`);
+    const updatedRegulars = regularList.map(item =>
+      item.id === id ? { ...item, isPresent: true } : item
+    );
+    setRegularList(updatedRegulars);
+    saveDataToStorage(updatedRegulars, null, null, null);
+    Alert.alert("Present ✅", `${member.name} has been marked Present in the All list.`);
+  };
+
+  // ALL LIST: tap ang ✅ Present para i-uncheck.
+  // Regular: Present lang ang matatanggal. Timer: babalik din ang count ng -1 (hal. 3/4 -> 2/4).
+  const handleUncheckPresent = (item) => {
+    if (item.status === 'Regular') {
+      const updatedRegulars = regularList.map(r =>
+        r.id === item.id ? { ...r, isPresent: false } : r
+      );
+      setRegularList(updatedRegulars);
+      saveDataToStorage(updatedRegulars, null, null, null);
+    } else {
+      const updatedNewbies = newbieList.map(n => {
+        if (n.id !== item.id) return n;
+        const newCount = Math.max(0, (n.presentCountNumber || 0) - 1);
+        return {
+          ...n,
+          isPresent: false,
+          presentCountNumber: newCount,
+          presentCount: `${newCount} / 4`,
+          status: getNewbieStatusLabel(newCount)
+        };
+      });
+      setNewbieList(updatedNewbies);
+      saveDataToStorage(null, updatedNewbies, null, null);
+    }
+  };
+
+  // UNDO (Timers): ibabalik ang namali na Mark Present.
+  // Babawas ng 1 sa count (hal. 3/4 -> 2/4) at otomatikong babalik sa tamang tab
+  // (Third Timer -> Second Timer, atbp.). Naka-uncheck na rin siya sa All list.
+  const handleUndoNewbiePresent = (item) => {
+    Alert.alert(
+      "Undo Present",
+      `Ibabalik si ${item.name} sa ${Math.max(0, (item.presentCountNumber || 0) - 1)} / 4. Tuloy?`,
+      [
+        { text: "Cancel", style: "cancel" },
+        { text: "Undo", style: "destructive", onPress: () => handleUncheckPresent(item) }
+      ]
+    );
+  };
+
+  // QR SCAN: Regular members LANG na may QR code ang awtomatikong mate-check.
+  // Hindi apektado ang First / Second / Third Timer (walang madadagdag na bilang).
+  const handleBarCodeScanned = ({ data }) => {
+    if (scanLockRef.current) return; // iwas double-scan
+    scanLockRef.current = true;
+    setScannerModalVisible(false);
+
+    const scanned = String(data).trim();
+    const regular = regularList.find(item => item.id === scanned);
+
+    if (regular) {
+      if (regular.isPresent) {
+        Alert.alert("Already Present", `${regular.name} is already marked Present.`);
+        return;
+      }
+      const updatedRegulars = regularList.map(item =>
+        item.id === regular.id ? { ...item, isPresent: true } : item
+      );
+      setRegularList(updatedRegulars);
+      saveDataToStorage(updatedRegulars, null, null, null);
+      Alert.alert("Success! 🎉", `${regular.name} has been marked as Present ✅`);
+      return;
+    }
+
+    // Kung timer ang na-scan, wala siyang gagalawin
+    if (newbieList.some(n => n.id === scanned)) {
+      Alert.alert(
+        "Timer Member",
+        "Regular members with QR code lang ang pwedeng i-scan. Para sa Timers, gamitin ang Present button."
+      );
+      return;
+    }
+
+    Alert.alert("Not Found", "Walang Regular member na tugma sa QR code na ito.");
   };
 
   const handleDelete = (id, isRegular) => {
@@ -300,9 +465,9 @@ export default function AttendanceScreen() {
       "Are you sure you want to delete this record?",
       [
         { text: "Cancel", style: "cancel" },
-        { 
-          text: "Delete", 
-          style: "destructive", 
+        {
+          text: "Delete",
+          style: "destructive",
           onPress: () => {
             if (isRegular) {
               const updated = regularList.filter(item => item.id !== id);
@@ -331,6 +496,7 @@ export default function AttendanceScreen() {
     setCellLeader('N/A');
     setInvitedBy('');
     setPhoto(null);
+    setFormForceRegular(false);
     setModalVisible(true);
   };
 
@@ -354,13 +520,283 @@ export default function AttendanceScreen() {
     setQrModalVisible(true);
   };
 
+  // ====== LEADERS ======
+  const normalizeName = (s) => String(s || '').trim().toLowerCase();
+
+  const saveLeadersToStorage = async (list) => {
+    try {
+      await AsyncStorage.setItem('@leaders_list', JSON.stringify(list));
+    } catch (e) {
+      console.log("Error saving leaders", e);
+    }
+  };
+
+  // Members ng leader = mga Regular na ang Cell Leader ay kapareho ng pangalan ng leader
+  const getLeaderMembers = (leader) =>
+    regularList
+      .filter(r => normalizeName(r.cellLeader) === normalizeName(leader.name))
+      .sort((a, b) => a.name.localeCompare(b.name));
+
+  // A-Z at naka-filter base sa search bar (pangalan ng leader)
+  const sortedLeaders = [...leadersList]
+    .filter(l => normalizeName(l.name).includes(normalizeName(leaderSearch)))
+    .sort((a, b) => a.name.localeCompare(b.name));
+
+  const handleOpenAddLeader = () => {
+    setEditLeaderId(null);
+    setLName('');
+    setLSex('');
+    setLAge('');
+    setLBirthday('');
+    setLAddress('');
+    setLContact('');
+    setLeadersModalVisible(false);
+    setLeaderFormVisible(true);
+  };
+
+  const handleOpenEditLeader = (leader) => {
+    setEditLeaderId(leader.id);
+    setLName(leader.name || '');
+    setLSex(leader.sex && leader.sex !== 'N/A' ? leader.sex : '');
+    setLAge(leader.age && leader.age !== 'N/A' ? String(leader.age) : '');
+    setLBirthday(leader.birthday && leader.birthday !== 'N/A' ? leader.birthday : '');
+    setLAddress(leader.address && leader.address !== 'N/A' ? leader.address : '');
+    setLContact(leader.contact && leader.contact !== 'N/A' ? leader.contact : '');
+    setLeadersModalVisible(false);
+    setLeaderFormVisible(true);
+  };
+
+  const handleCancelLeaderForm = () => {
+    setLeaderFormVisible(false);
+    setLeaderDatePickerVisible(false);
+    setLeadersModalVisible(true);
+  };
+
+  const handleLeaderDateChange = (event, selectedDate) => {
+    setLeaderDatePickerVisible(false);
+    if (selectedDate) {
+      setLSelectedDate(selectedDate);
+      setLBirthday(selectedDate.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' }));
+    }
+  };
+
+  const handleSaveLeader = () => {
+    if (!lName.trim()) {
+      Alert.alert("Error", "Please enter the Leader's Full Name.");
+      return;
+    }
+    const duplicate = leadersList.some(
+      l => l.id !== editLeaderId && normalizeName(l.name) === normalizeName(lName)
+    );
+    if (duplicate) {
+      Alert.alert("Duplicate", "May leader na may ganitong pangalan.");
+      return;
+    }
+
+    const data = {
+      name: lName.trim(),
+      sex: lSex || 'N/A',
+      age: lAge || 'N/A',
+      birthday: lBirthday || 'N/A',
+      address: lAddress || 'N/A',
+      contact: lContact || 'N/A',
+    };
+
+    let updatedLeaders;
+    if (editLeaderId) {
+      const old = leadersList.find(l => l.id === editLeaderId);
+      updatedLeaders = leadersList.map(l => (l.id === editLeaderId ? { ...l, ...data } : l));
+
+      // Kung pinalitan ang pangalan ng leader, i-update din ang Cell Leader ng mga members niya
+      if (old && normalizeName(old.name) !== normalizeName(data.name)) {
+        const updatedRegulars = regularList.map(r =>
+          normalizeName(r.cellLeader) === normalizeName(old.name) ? { ...r, cellLeader: data.name } : r
+        );
+        setRegularList(updatedRegulars);
+        saveDataToStorage(updatedRegulars, null, null, null);
+      }
+    } else {
+      updatedLeaders = [{ id: Date.now().toString(), ...data }, ...leadersList];
+    }
+
+    setLeadersList(updatedLeaders);
+    saveLeadersToStorage(updatedLeaders);
+    setLeaderFormVisible(false);
+    setLeaderDatePickerVisible(false);
+    setLeadersModalVisible(true);
+    Alert.alert("Success", editLeaderId ? "Successfully updated leader!" : "Successfully added leader!");
+  };
+
+  const handleDeleteLeader = (leader) => {
+    const memberCount = getLeaderMembers(leader).length;
+    Alert.alert(
+      "Delete Leader",
+      memberCount > 0
+        ? `I-delete si ${leader.name}? Hindi made-delete ang ${memberCount} member(s) niya, mananatili sila sa Regular list.`
+        : `I-delete si ${leader.name}?`,
+      [
+        { text: "Cancel", style: "cancel" },
+        {
+          text: "Delete",
+          style: "destructive",
+          onPress: () => {
+            const updated = leadersList.filter(l => l.id !== leader.id);
+            setLeadersList(updated);
+            saveLeadersToStorage(updated);
+          }
+        }
+      ]
+    );
+  };
+
+  // Awtomatikong gagawa ng leaders mula sa Cell Leader names ng mga Regular members
+  const handleImportLeadersFromMembers = () => {
+    const existing = new Set(leadersList.map(l => normalizeName(l.name)));
+    const toAdd = [];
+    regularList.forEach(r => {
+      const nm = String(r.cellLeader || '').trim();
+      const key = normalizeName(nm);
+      if (!nm || key === 'n/a' || existing.has(key)) return;
+      existing.add(key);
+      toAdd.push({
+        id: Date.now().toString() + Math.random(),
+        name: nm,
+        sex: 'N/A',
+        age: 'N/A',
+        birthday: 'N/A',
+        address: 'N/A',
+        contact: 'N/A',
+      });
+    });
+
+    if (toAdd.length === 0) {
+      Alert.alert("Auto-add", "Walang bagong leader na maidadagdag.");
+      return;
+    }
+    const updated = [...toAdd, ...leadersList];
+    setLeadersList(updated);
+    saveLeadersToStorage(updated);
+    Alert.alert("Auto-add ✅", `${toAdd.length} leader(s) ang naidagdag. I-edit sila para mailagay ang personal data.`);
+  };
+
+  // Member form: kung galing sa Leaders screen, babalik doon pagkatapos mag-save/cancel
+  const closeMemberModal = () => {
+    setModalVisible(false);
+    if (returnToLeaders) {
+      setReturnToLeaders(false);
+      setLeadersModalVisible(true);
+    }
+  };
+
+  const handleOpenAddMemberForLeader = (leader) => {
+    setLeadersModalVisible(false);
+    handleOpenAdd();
+    setFormForceRegular(true);
+    setCellLeader(leader.name);
+    setReturnToLeaders(true);
+  };
+
+  const handleOpenEditMember = (member) => {
+    setLeadersModalVisible(false);
+    handleOpenEdit(member, true);
+    setReturnToLeaders(true);
+  };
+
+  // PRINT LEADERS: lahat ng leaders (kung ano ang naka-filter sa search bar) kasama ang members nila
+  const handlePrintLeaders = async () => {
+    if (sortedLeaders.length === 0) {
+      Alert.alert("No Records", "There are no leaders to print.");
+      return;
+    }
+    try {
+      const totalMembers = sortedLeaders.reduce((sum, l) => sum + getLeaderMembers(l).length, 0);
+      const title = leaderSearch.trim() !== ''
+        ? `Leaders & Members - "${leaderSearch.trim()}"`
+        : 'Leaders & Members';
+
+      const sections = sortedLeaders.map((leader, li) => {
+        const members = getLeaderMembers(leader);
+        const rows = members.length === 0
+          ? `<tr><td colspan="6" style="text-align:center;color:#64748B;">No members yet</td></tr>`
+          : members.map((m, i) => `
+              <tr>
+                <td>${i + 1}</td>
+                <td><b>${m.name}</b></td>
+                <td>${m.sex} / ${getDisplayAge(m.age, m.birthday)}</td>
+                <td>${m.birthday}</td>
+                <td>${m.address}</td>
+                <td>${m.dateFilledOut || 'N/A'}</td>
+              </tr>
+            `).join('');
+
+        return `
+          <div class="leader">
+            <h3>${li + 1}. ${leader.name} <span class="count">(${members.length} member${members.length === 1 ? '' : 's'})</span></h3>
+            <div class="info">
+              ${leader.sex} / ${getDisplayAge(leader.age, leader.birthday) || 'N/A'}
+              &nbsp;|&nbsp; B-Day: ${leader.birthday}
+              &nbsp;|&nbsp; Address: ${leader.address}
+              &nbsp;|&nbsp; Contact: ${leader.contact}
+            </div>
+            <table>
+              <thead>
+                <tr>
+                  <th>#</th>
+                  <th>Member Name</th>
+                  <th>Sex / Age</th>
+                  <th>Birthday</th>
+                  <th>Address</th>
+                  <th>Date Filled Out</th>
+                </tr>
+              </thead>
+              <tbody>${rows}</tbody>
+            </table>
+          </div>
+        `;
+      }).join('');
+
+      const htmlContent = `
+        <html>
+          <head>
+            <style>
+              body { font-family: Helvetica, Arial, sans-serif; padding: 20px; color: #1E293B; }
+              h2 { text-align: center; margin-bottom: 5px; }
+              .summary { text-align: center; margin-bottom: 20px; font-size: 13px; color: #64748B; font-weight: bold; }
+              .leader { margin-bottom: 22px; page-break-inside: avoid; }
+              h3 { margin: 0 0 4px 0; font-size: 15px; color: #0F172A; }
+              .count { font-size: 12px; color: #047857; font-weight: normal; }
+              .info { font-size: 11px; color: #475569; margin-bottom: 6px; }
+              table { width: 100%; border-collapse: collapse; }
+              th, td { border: 1px solid #CBD5E1; padding: 6px 8px; text-align: left; font-size: 11px; }
+              th { background-color: #0F172A; color: #FFF; }
+              tr:nth-child(even) { background-color: #F8FAFC; }
+            </style>
+          </head>
+          <body>
+            <h2>IKONEK - ${title}</h2>
+            <div class="summary">Total Leaders: ${sortedLeaders.length} | Total Members: ${totalMembers}</div>
+            ${sections}
+          </body>
+        </html>
+      `;
+      await Print.printAsync({ html: htmlContent });
+    } catch (error) {
+      Alert.alert("Error", "Unable to print at the moment.");
+    }
+  };
+
+  // Regular ba ang ine-edit / dinadagdag sa Add/Edit form?
+  const isRegularForm = isEditing
+    ? regularList.some(r => r.id === editId)
+    : (formForceRegular || activeTab === 'Regular');
+
   const handleSave = () => {
     if (!name.trim()) {
       Alert.alert("Error", "Please enter the Full Name.");
       return;
     }
 
-    const isAddingRegular = activeTab === 'Regular';
+    const isAddingRegular = isRegularForm;
     let updatedEvents = [...eventsList];
 
     if (birthday.trim() !== '') {
@@ -374,8 +810,8 @@ export default function AttendanceScreen() {
     }
 
     if (isEditing) {
-      if (activeTab === 'Regular') {
-        const updatedRegulars = regularList.map(item => 
+      if (isRegularForm) {
+        const updatedRegulars = regularList.map(item =>
           item.id === editId ? {
             ...item,
             name,
@@ -391,7 +827,7 @@ export default function AttendanceScreen() {
         setRegularList(updatedRegulars);
         saveDataToStorage(updatedRegulars, null, updatedEvents, null);
       } else {
-        const updatedNewbies = newbieList.map(item => 
+        const updatedNewbies = newbieList.map(item =>
           item.id === editId ? {
             ...item,
             name,
@@ -407,7 +843,7 @@ export default function AttendanceScreen() {
         setNewbieList(updatedNewbies);
         saveDataToStorage(null, updatedNewbies, updatedEvents, null);
       }
-      setModalVisible(false);
+      closeMemberModal();
       Alert.alert("Success", "Successfully updated record!");
     } else {
       if (isAddingRegular) {
@@ -448,7 +884,7 @@ export default function AttendanceScreen() {
         saveDataToStorage(null, updatedNewbies, updatedEvents, null);
       }
 
-      setModalVisible(false);
+      closeMemberModal();
       Alert.alert("Success", "Successfully added record!");
     }
   };
@@ -472,7 +908,7 @@ export default function AttendanceScreen() {
           <body>
             <h2>IKONEK - Attendance & Youth Master List</h2>
             <div class="summary">
-              Total Regulars: ${regularList.length} | Total Timers/Newbies: ${newbieList.length} | Overall Total: ${combined.length}
+              Total Regulars: ${regularList.length} | Total Timers/Newbies: ${newbieList.length} | Overall Total: ${combined.length} | Present: ${combined.filter(i => i.isPresent).length}
             </div>
             <table>
               <thead>
@@ -485,11 +921,12 @@ export default function AttendanceScreen() {
                   <th>Address</th>
                   <th>Cell Leader / Invited By</th>
                   <th>Date Filled Out</th>
+                  <th>Present</th>
                 </tr>
               </thead>
               <tbody>
                 ${combined.map((item, index) => `
-                  <tr>
+                  <tr style="${item.isPresent ? 'background-color:#D1FAE5;' : ''}">
                     <td>${index + 1}</td>
                     <td><b>${item.name}</b></td>
                     <td>${item.status}</td>
@@ -498,6 +935,81 @@ export default function AttendanceScreen() {
                     <td>${item.address}</td>
                     <td>${item.status === 'Regular' ? item.cellLeader : item.invitedBy}</td>
                     <td>${item.dateFilledOut}</td>
+                    <td style="text-align:center;">${item.isPresent ? '<b style="color:#047857;">&#10004; Present</b>' : '—'}</td>
+                  </tr>
+                `).join('')}
+              </tbody>
+            </table>
+          </body>
+        </html>
+      `;
+      await Print.printAsync({ html: htmlContent });
+      // Pagkatapos ma-print: ilipat sa History ang mga Present at i-clear ang All list
+      archiveAndClearAttendance();
+    } catch (error) {
+      Alert.alert("Error", "Unable to print at the moment.");
+    }
+  };
+
+  // HISTORY: i-filter base sa date (o pangalan) na tinype sa search bar
+  const filteredHistory = attendanceHistory.filter(log => {
+    const q = historySearch.trim().toLowerCase();
+    if (!q) return true;
+    return (log.date || '').toLowerCase().includes(q) || (log.name || '').toLowerCase().includes(q);
+  });
+
+  // I-print ang History (kung ano ang naka-filter sa search bar)
+  const handlePrintHistory = async () => {
+    if (filteredHistory.length === 0) {
+      Alert.alert("No Records", "There are no attendance records to print.");
+      return;
+    }
+    try {
+      const title = historySearch.trim() !== ''
+        ? `Attendance Logs - ${historySearch.trim()}`
+        : 'Attendance Logs - All Dates';
+      const htmlContent = `
+        <html>
+          <head>
+            <style>
+              body { font-family: Helvetica, Arial, sans-serif; padding: 20px; color: #1E293B; }
+              h2 { text-align: center; margin-bottom: 5px; }
+              .summary { text-align: center; margin-bottom: 20px; font-size: 13px; color: #64748B; font-weight: bold; }
+              table { width: 100%; border-collapse: collapse; margin-top: 10px; }
+              th, td { border: 1px solid #CBD5E1; padding: 8px 10px; text-align: left; font-size: 12px; }
+              th { background-color: #0F172A; color: #FFF; }
+              tr:nth-child(even) { background-color: #F8FAFC; }
+            </style>
+          </head>
+          <body>
+            <h2>IKONEK - ${title}</h2>
+            <div class="summary">Total Records: ${filteredHistory.length}</div>
+            <table>
+              <thead>
+                <tr>
+                  <th>#</th>
+                  <th>Full Name</th>
+                  <th>Status</th>
+                  <th>Sex / Age</th>
+                  <th>Birthday</th>
+                  <th>Address</th>
+                  <th>Cell Leader / Invited By</th>
+                  <th>Date</th>
+                  <th>Time</th>
+                </tr>
+              </thead>
+              <tbody>
+                ${filteredHistory.map((log, index) => `
+                  <tr>
+                    <td>${index + 1}</td>
+                    <td><b>${log.name}</b></td>
+                    <td>${log.status}</td>
+                    <td>${log.sex} / ${log.age}</td>
+                    <td>${log.birthday}</td>
+                    <td>${log.address}</td>
+                    <td>${log.leaderOrInvited}</td>
+                    <td>${log.date}</td>
+                    <td>${log.time}</td>
                   </tr>
                 `).join('')}
               </tbody>
@@ -525,18 +1037,20 @@ export default function AttendanceScreen() {
   }
 
   if (searchQuery.trim() !== '') {
-    combinedData = combinedData.filter(item => 
+    combinedData = combinedData.filter(item =>
       item.name.toLowerCase().includes(searchQuery.toLowerCase()) ||
       item.address.toLowerCase().includes(searchQuery.toLowerCase())
     );
   }
 
   combinedData.sort((a, b) => {
-    if (sortOrder === 'A-Z') {
-      return a.name.localeCompare(b.name);
-    } else {
-      return b.name.localeCompare(a.name);
+    // Sa All tab, nasa itaas ang mga present ngayong araw
+    if (activeTab === 'All' && !!a.isPresent !== !!b.isPresent) {
+      return a.isPresent ? -1 : 1;
     }
+    return sortOrder === 'A-Z'
+      ? a.name.localeCompare(b.name)
+      : b.name.localeCompare(a.name);
   });
 
   const totalAllCount = regularList.length + newbieList.length;
@@ -559,11 +1073,11 @@ export default function AttendanceScreen() {
   return (
     <SafeAreaView style={[styles.container, { backgroundColor: theme.bg }]}>
       <ScrollView contentContainerStyle={styles.scrollContainer} showsVerticalScrollIndicator={false}>
-        
+
         {/* HEADER & THEME TOGGLE ROW */}
         <View style={styles.headerRow}>
           <Text style={[styles.headerTitle, { color: theme.textMain }]}>Attendance Tracker</Text>
-          <TouchableOpacity 
+          <TouchableOpacity
             style={[styles.themeToggleBtn, { backgroundColor: isDarkMode ? '#334155' : '#E2E8F0', borderColor: theme.border }]}
             onPress={() => {
               const newMode = !isDarkMode;
@@ -578,54 +1092,63 @@ export default function AttendanceScreen() {
         </View>
 
         <View style={styles.topControlRow}>
-          <TextInput 
-            style={[styles.searchInput, { backgroundColor: theme.inputBg, borderColor: theme.border, color: theme.textMain }]} 
-            placeholder="🔍 Search name or address..." 
+          <TextInput
+            style={[styles.searchInput, { backgroundColor: theme.inputBg, borderColor: theme.border, color: theme.textMain }]}
+            placeholder="🔍 Search name or address..."
             placeholderTextColor={theme.textSub}
             value={searchQuery}
             onChangeText={setSearchQuery}
           />
 
-          <TouchableOpacity 
-            style={[styles.iconActionBtn, { backgroundColor: theme.cardBg, borderColor: theme.border }]} 
+          <TouchableOpacity
+            style={[styles.iconActionBtn, { backgroundColor: theme.cardBg, borderColor: theme.border }]}
             onPress={() => setSortOrder(sortOrder === 'A-Z' ? 'Z-A' : 'A-Z')}
           >
             <Text style={styles.iconBtnText}>🔤 {sortOrder}</Text>
           </TouchableOpacity>
 
-          <TouchableOpacity 
-            style={[styles.iconActionBtn, { backgroundColor: theme.cardBg, borderColor: theme.border }]} 
+          <TouchableOpacity
+            style={[styles.iconActionBtn, { backgroundColor: theme.cardBg, borderColor: theme.border }]}
             onPress={() => {
               if (hasCameraPermission === false) {
                 Alert.alert("Permission Error", "Camera permission is not granted.");
                 return;
               }
+              scanLockRef.current = false; // i-reset ang lock bago buksan ang camera
               setScannerModalVisible(true);
             }}
           >
             <Text style={styles.iconBtnText}>📷 Scan</Text>
           </TouchableOpacity>
 
-          <TouchableOpacity 
-            style={[styles.iconActionBtn, { backgroundColor: theme.cardBg, borderColor: theme.border }]} 
+          <TouchableOpacity
+            style={[styles.iconActionBtn, { backgroundColor: theme.cardBg, borderColor: theme.border }]}
             onPress={handleDirectPrint}
           >
             <Text style={styles.iconBtnText}>🖨 Print</Text>
           </TouchableOpacity>
 
           {/* HISTORY BUTTON */}
-          <TouchableOpacity 
-            style={[styles.iconActionBtn, { backgroundColor: '#3B82F6', borderColor: '#2563EB' }]} 
+          <TouchableOpacity
+            style={[styles.iconActionBtn, { backgroundColor: '#3B82F6', borderColor: '#2563EB' }]}
             onPress={() => setHistoryModalVisible(true)}
           >
             <Text style={[styles.iconBtnText, { color: '#FFF' }]}>📋 History</Text>
+          </TouchableOpacity>
+
+          {/* LEADERS BUTTON */}
+          <TouchableOpacity
+            style={[styles.iconActionBtn, { backgroundColor: '#8B5CF6', borderColor: '#7C3AED' }]}
+            onPress={() => setLeadersModalVisible(true)}
+          >
+            <Text style={[styles.iconBtnText, { color: '#FFF' }]}>👥 Leaders</Text>
           </TouchableOpacity>
         </View>
 
         {/* ADD NEW MEMBER BUTTON */}
         {activeTab !== 'All' && (
-          <TouchableOpacity 
-            style={styles.addYouthBtn} 
+          <TouchableOpacity
+            style={styles.addYouthBtn}
             onPress={handleOpenAdd}
           >
             <Text style={styles.addYouthBtnText}>
@@ -637,7 +1160,7 @@ export default function AttendanceScreen() {
         {/* TABS BUTTONS */}
         <ScrollView horizontal showsHorizontalScrollIndicator={false} style={styles.tabScrollContainer}>
           <View style={[styles.tabContainer, { backgroundColor: theme.cardBg, borderColor: theme.border }]}>
-            <TouchableOpacity 
+            <TouchableOpacity
               style={[styles.tabBtn, activeTab === 'All' && styles.activeTabBtn]}
               onPress={() => setActiveTab('All')}
             >
@@ -646,7 +1169,7 @@ export default function AttendanceScreen() {
               </Text>
             </TouchableOpacity>
 
-            <TouchableOpacity 
+            <TouchableOpacity
               style={[styles.tabBtn, activeTab === 'Regular' && styles.activeTabBtn]}
               onPress={() => setActiveTab('Regular')}
             >
@@ -655,7 +1178,7 @@ export default function AttendanceScreen() {
               </Text>
             </TouchableOpacity>
 
-            <TouchableOpacity 
+            <TouchableOpacity
               style={[styles.tabBtn, activeTab === 'First Timer' && styles.activeTabBtn]}
               onPress={() => setActiveTab('First Timer')}
             >
@@ -664,7 +1187,7 @@ export default function AttendanceScreen() {
               </Text>
             </TouchableOpacity>
 
-            <TouchableOpacity 
+            <TouchableOpacity
               style={[styles.tabBtn, activeTab === 'Second Timer' && styles.activeTabBtn]}
               onPress={() => setActiveTab('Second Timer')}
             >
@@ -673,7 +1196,7 @@ export default function AttendanceScreen() {
               </Text>
             </TouchableOpacity>
 
-            <TouchableOpacity 
+            <TouchableOpacity
               style={[styles.tabBtn, activeTab === 'Third Timer' && styles.activeTabBtn]}
               onPress={() => setActiveTab('Third Timer')}
             >
@@ -694,14 +1217,24 @@ export default function AttendanceScreen() {
               <Text style={[styles.tableHeaderCell, { flex: 1.2, color: theme.tableHeaderText }]}>Details</Text>
               <Text style={[styles.tableHeaderCell, { flex: 1.2, color: theme.tableHeaderText }]}>Address</Text>
               <Text style={[styles.tableHeaderCell, { flex: 1.3, color: theme.tableHeaderText }]}>Leader / Invited</Text>
+              <Text style={[styles.tableHeaderCell, { flex: 0.9, color: theme.tableHeaderText }]}>Status</Text>
             </View>
             {combinedData.map((item, index) => {
               const isBday = isBirthdayToday(item.birthday);
               const displayAge = getDisplayAge(item.age, item.birthday);
+              const presentNow = !!item.isPresent;
               return (
-                <View key={item.id} style={[styles.tableRow, { borderBottomColor: theme.border }, index % 2 === 1 && { backgroundColor: theme.tableAlt }]}>
+                <View
+                  key={item.id}
+                  style={[
+                    styles.tableRow,
+                    { borderBottomColor: theme.border },
+                    index % 2 === 1 && { backgroundColor: theme.tableAlt },
+                    presentNow && { backgroundColor: isDarkMode ? '#064E3B' : '#D1FAE5' }
+                  ]}
+                >
                   <Text style={[styles.tableCell, { flex: 0.5, color: theme.textSub }]}>{index + 1}</Text>
-                  
+
                   <View style={{ flex: 1.8, justifyContent: 'center' }}>
                     <View style={{ flexDirection: 'row', alignItems: 'center', gap: 4 }}>
                       <Text style={[styles.tableCell, { fontWeight: 'bold', color: theme.textMain }]}>{item.name}</Text>
@@ -728,6 +1261,16 @@ export default function AttendanceScreen() {
                       {item.status === 'Regular' ? item.cellLeader : item.invitedBy}
                     </Text>
                   </View>
+
+                  <TouchableOpacity
+                    style={{ flex: 0.9, justifyContent: 'center', alignSelf: 'stretch' }}
+                    disabled={!presentNow}
+                    onPress={() => handleUncheckPresent(item)}
+                  >
+                    <Text style={{ fontSize: 10, fontWeight: 'bold', color: presentNow ? '#34D399' : theme.textSub }}>
+                      {presentNow ? '✅ Present' : '—'}
+                    </Text>
+                  </TouchableOpacity>
                 </View>
               );
             })}
@@ -774,15 +1317,13 @@ export default function AttendanceScreen() {
                   {!isRegular ? (
                     <Text style={styles.countText}>Present Count: {item.presentCount}</Text>
                   ) : (
-                    <Text style={styles.countTextRegular}>
-                      {item.isPresent ? "Status: Present ✅" : "Status: Not Marked"}
-                    </Text>
+                    <View />
                   )}
-                  
+
                   <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
                     {isRegular && (
-                      <TouchableOpacity 
-                        style={styles.qrBtnInline} 
+                      <TouchableOpacity
+                        style={styles.qrBtnInline}
                         onPress={() => handleOpenQR(item)}
                       >
                         <Text style={styles.qrBtnText}>📱 View QR</Text>
@@ -798,32 +1339,42 @@ export default function AttendanceScreen() {
                 </View>
 
                 <View style={styles.actionRow}>
-                  <TouchableOpacity 
-                    style={styles.deleteBtn} 
+                  <TouchableOpacity
+                    style={styles.deleteBtn}
                     onPress={() => handleDelete(item.id, isRegular)}
                   >
                     <Text style={styles.btnText}>🗑 Delete</Text>
                   </TouchableOpacity>
 
-                  <TouchableOpacity 
-                    style={styles.editBtn} 
+                  <TouchableOpacity
+                    style={styles.editBtn}
                     onPress={() => handleOpenEdit(item, isRegular)}
                   >
                     <Text style={styles.btnText}>✏ Edit</Text>
                   </TouchableOpacity>
 
-                  <TouchableOpacity 
-                    style={[styles.presentBtn, item.isPresent && styles.activePresentBtn]} 
+                  {/* BACK / UNDO: para sa Timers lang, kung namali ng Mark Present */}
+                  {!isRegular && item.isPresent && (
+                    <TouchableOpacity
+                      style={styles.undoBtn}
+                      onPress={() => handleUndoNewbiePresent(item)}
+                    >
+                      <Text style={styles.btnText}>↩ Undo</Text>
+                    </TouchableOpacity>
+                  )}
+
+                  <TouchableOpacity
+                    style={[styles.presentBtn, !isRegular && item.isPresent && styles.activePresentBtn]}
                     onPress={() => {
                       if (!isRegular) {
                         handleTogglePresentNewbie(item.id);
                       } else {
-                        handleTogglePresentRegular(item.id);
+                        handleMarkPresentRegular(item.id);
                       }
                     }}
                   >
                     <Text style={styles.btnText}>
-                      {item.isPresent ? "✅ Present" : "Mark Present"}
+                      {!isRegular && item.isPresent ? "✅ Present" : "Mark Present"}
                     </Text>
                   </TouchableOpacity>
                 </View>
@@ -837,12 +1388,12 @@ export default function AttendanceScreen() {
           visible={modalVisible}
           animationType="slide"
           transparent={true}
-          onRequestClose={() => setModalVisible(false)}
+          onRequestClose={closeMemberModal}
         >
           <View style={styles.modalOverlay}>
             <View style={[styles.modalContent, { backgroundColor: theme.cardBg }]}>
               <Text style={[styles.modalTitle, { color: theme.textMain }]}>
-                {isEditing ? 'Edit Record' : `Add New ${activeTab === 'Regular' ? 'Regular' : 'Timer'} Member`}
+                {isEditing ? 'Edit Record' : `Add New ${isRegularForm ? 'Regular' : 'Timer'} Member`}
               </Text>
 
               <ScrollView showsVerticalScrollIndicator={false}>
@@ -920,7 +1471,7 @@ export default function AttendanceScreen() {
                   onChangeText={setAddress}
                 />
 
-                {activeTab === 'Regular' ? (
+                {isRegularForm ? (
                   <>
                     <Text style={[styles.inputLabel, { color: theme.textSub }]}>Cell Leader</Text>
                     <TextInput
@@ -947,7 +1498,7 @@ export default function AttendanceScreen() {
                 <View style={styles.modalBtnRow}>
                   <TouchableOpacity
                     style={[styles.modalCancelBtn, { backgroundColor: theme.border }]}
-                    onPress={() => setModalVisible(false)}
+                    onPress={closeMemberModal}
                   >
                     <Text style={styles.modalCancelText}>Cancel</Text>
                   </TouchableOpacity>
@@ -1015,44 +1566,75 @@ export default function AttendanceScreen() {
                 </TouchableOpacity>
               </View>
 
-              <Text style={{ fontSize: 11, color: theme.textSub, marginBottom: 10 }}>
-                All present marks or scans from the tabs are automatically saved here along with complete member records.
-              </Text>
+              <TextInput
+                style={[styles.historySearchInput, { backgroundColor: theme.inputBg, borderColor: theme.border, color: theme.textMain }]}
+                placeholder="🔍 Search date (e.g. Oct 5, 2026)..."
+                placeholderTextColor={theme.textSub}
+                value={historySearch}
+                onChangeText={setHistorySearch}
+              />
 
-              {attendanceHistory.length === 0 ? (
-                <Text style={[styles.noDataText, { color: theme.textSub, marginTop: 60 }]}>No attendance logs recorded yet.</Text>
+              <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 }}>
+                <Text style={{ fontSize: 11, color: theme.textSub }}>
+                  Showing {filteredHistory.length} of {attendanceHistory.length} record(s)
+                </Text>
+                <TouchableOpacity style={styles.historyPrintBtn} onPress={handlePrintHistory}>
+                  <Text style={styles.historyPrintBtnText}>🖨 Print</Text>
+                </TouchableOpacity>
+              </View>
+
+              {filteredHistory.length === 0 ? (
+                <Text style={[styles.noDataText, { color: theme.textSub, marginTop: 60 }]}>No attendance logs found.</Text>
               ) : (
-                <ScrollView showsVerticalScrollIndicator={false}>
-                  {attendanceHistory.map((log) => (
-                    <View key={log.id} style={[styles.historyItemCard, { backgroundColor: theme.inputBg, borderColor: theme.border }]}>
-                      <View style={{ flexDirection: 'row', alignItems: 'center', flex: 1 }}>
-                        {log.photo ? (
-                          <Image source={{ uri: log.photo }} style={{ width: 40, height: 40, borderRadius: 20, marginRight: 10 }} />
-                        ) : (
-                          <View style={{ width: 40, height: 40, borderRadius: 20, backgroundColor: '#334155', justifyContent: 'center', alignItems: 'center', marginRight: 10 }}>
-                            <Text style={{ color: '#FFF', fontWeight: 'bold' }}>{log.name.charAt(0)}</Text>
-                          </View>
-                        )}
-                        <View style={{ flex: 1 }}>
-                          <Text style={{ fontWeight: 'bold', fontSize: 13, color: theme.textMain }}>{log.name}</Text>
-                          <Text style={{ fontSize: 10, color: '#38BDF8', marginTop: 1 }}>
-                            Status: {log.status} • {log.sex} • Age: {log.age}
-                          </Text>
-                          <Text style={{ fontSize: 9, color: theme.textSub, marginTop: 1 }}>
-                            Birthday: {log.birthday} | Address: {log.address}
-                          </Text>
-                          <Text style={{ fontSize: 9, color: '#F59E0B', marginTop: 1 }}>
-                            Leader/Invited: {log.leaderOrInvited}
+                <View style={[styles.tableContainer, { flex: 1, backgroundColor: theme.cardBg, borderColor: theme.border }]}>
+                  <View style={[styles.tableHeaderRow, { backgroundColor: theme.tableHeader, borderBottomColor: theme.border }]}>
+                    <Text style={[styles.tableHeaderCell, { flex: 0.4, color: theme.tableHeaderText }]}>#</Text>
+                    <Text style={[styles.tableHeaderCell, { flex: 1.8, color: theme.tableHeaderText }]}>Name & Status</Text>
+                    <Text style={[styles.tableHeaderCell, { flex: 1.2, color: theme.tableHeaderText }]}>Details</Text>
+                    <Text style={[styles.tableHeaderCell, { flex: 1.2, color: theme.tableHeaderText }]}>Address</Text>
+                    <Text style={[styles.tableHeaderCell, { flex: 1.2, color: theme.tableHeaderText }]}>Leader / Invited</Text>
+                    <Text style={[styles.tableHeaderCell, { flex: 1.1, color: theme.tableHeaderText }]}>Date</Text>
+                  </View>
+                  <ScrollView showsVerticalScrollIndicator={false}>
+                    {filteredHistory.map((log, index) => (
+                      <View
+                        key={log.id}
+                        style={[
+                          styles.tableRow,
+                          { borderBottomColor: theme.border },
+                          index % 2 === 1 && { backgroundColor: theme.tableAlt }
+                        ]}
+                      >
+                        <Text style={[styles.tableCell, { flex: 0.4, color: theme.textSub }]}>{index + 1}</Text>
+
+                        <View style={{ flex: 1.8, justifyContent: 'center' }}>
+                          <Text style={[styles.tableCell, { fontWeight: 'bold', color: theme.textMain }]}>{log.name}</Text>
+                          <Text style={{ fontSize: 9, color: log.status === 'Regular' ? '#34D399' : '#F59E0B', marginTop: 1 }}>
+                            {log.status}
                           </Text>
                         </View>
+
+                        <View style={{ flex: 1.2, justifyContent: 'center' }}>
+                          <Text style={[styles.tableCell, { fontSize: 9, color: theme.textMain }]}>{log.sex} • {log.age}</Text>
+                          <Text style={[styles.tableCell, { fontSize: 8, color: theme.textSub }]}>{log.birthday}</Text>
+                        </View>
+
+                        <View style={{ flex: 1.2, justifyContent: 'center' }}>
+                          <Text style={[styles.tableCell, { fontSize: 10, color: theme.textMain }]}>{log.address}</Text>
+                        </View>
+
+                        <View style={{ flex: 1.2, justifyContent: 'center' }}>
+                          <Text style={[styles.tableCell, { fontSize: 10, color: '#38BDF8' }]}>{log.leaderOrInvited}</Text>
+                        </View>
+
+                        <View style={{ flex: 1.1, justifyContent: 'center' }}>
+                          <Text style={[styles.tableCell, { fontSize: 9, fontWeight: 'bold', color: theme.textMain }]}>{log.date}</Text>
+                          <Text style={[styles.tableCell, { fontSize: 8, color: theme.textSub }]}>{log.time}</Text>
+                        </View>
                       </View>
-                      <View style={{ alignItems: 'flex-end', marginLeft: 8 }}>
-                        <Text style={{ fontSize: 10, fontWeight: 'bold', color: theme.textMain }}>{log.date}</Text>
-                        <Text style={{ fontSize: 9, color: theme.textSub, marginTop: 2 }}>{log.time}</Text>
-                      </View>
-                    </View>
-                  ))}
-                </ScrollView>
+                    ))}
+                  </ScrollView>
+                </View>
               )}
 
               <TouchableOpacity
@@ -1061,6 +1643,242 @@ export default function AttendanceScreen() {
               >
                 <Text style={[styles.modalCancelText, { color: '#FFF' }]}>Close History</Text>
               </TouchableOpacity>
+            </View>
+          </View>
+        </Modal>
+
+        {/* LEADERS MODAL */}
+        <Modal
+          visible={leadersModalVisible}
+          animationType="slide"
+          transparent={true}
+          onRequestClose={() => setLeadersModalVisible(false)}
+        >
+          <View style={styles.modalOverlay}>
+            <View style={[styles.modalContent, { backgroundColor: theme.cardBg, height: '88%' }]}>
+              <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 10 }}>
+                <Text style={[styles.modalTitle, { color: theme.textMain, marginBottom: 0 }]}>
+                  👥 Leaders ({leadersList.length})
+                </Text>
+                <TouchableOpacity style={styles.modalSaveBtn} onPress={handleOpenAddLeader}>
+                  <Text style={styles.modalSaveText}>+ Add Leader</Text>
+                </TouchableOpacity>
+              </View>
+
+              <View style={{ flexDirection: 'row', gap: 8, marginBottom: 10 }}>
+                <TouchableOpacity
+                  style={styles.historyPrintBtn}
+                  onPress={handleImportLeadersFromMembers}
+                >
+                  <Text style={styles.historyPrintBtnText}>⚡ Auto-add leaders</Text>
+                </TouchableOpacity>
+
+                {/* PRINT LEADERS WITH MEMBERS */}
+                <TouchableOpacity
+                  style={[styles.historyPrintBtn, { backgroundColor: '#0369A1' }]}
+                  onPress={handlePrintLeaders}
+                >
+                  <Text style={styles.historyPrintBtnText}>🖨 Print Leaders</Text>
+                </TouchableOpacity>
+              </View>
+
+              <TextInput
+                style={[styles.historySearchInput, { backgroundColor: theme.inputBg, borderColor: theme.border, color: theme.textMain }]}
+                placeholder="🔍 Search leader name..."
+                placeholderTextColor={theme.textSub}
+                value={leaderSearch}
+                onChangeText={setLeaderSearch}
+              />
+
+              <ScrollView showsVerticalScrollIndicator={false}>
+                {sortedLeaders.length === 0 ? (
+                  <Text style={[styles.noDataText, { color: theme.textSub, marginTop: 40 }]}>
+                    {leaderSearch.trim() ? 'No leaders found.' : 'No leaders yet. Tap "+ Add Leader".'}
+                  </Text>
+                ) : (
+                  sortedLeaders.map(leader => {
+                    const members = getLeaderMembers(leader);
+                    const leaderAge = getDisplayAge(leader.age, leader.birthday);
+                    const isOpen = !!expandedLeaders[leader.id];
+                    return (
+                      <View
+                        key={leader.id}
+                        style={[styles.card, { backgroundColor: theme.inputBg, borderColor: theme.border }]}
+                      >
+                        <Text style={[styles.nameText, { color: theme.textMain }]}>{leader.name}</Text>
+                        <Text style={[styles.infoText, { color: theme.textSub }]}>
+                          {leader.sex} • {leaderAge || 'N/A'} • B-Day: {leader.birthday}
+                        </Text>
+                        <Text style={[styles.infoText, { color: theme.textSub }]}>Address: {leader.address}</Text>
+                        <Text style={[styles.infoText, { color: theme.textSub }]}>Contact: {leader.contact}</Text>
+
+                        <View style={styles.actionRow}>
+                          <TouchableOpacity style={styles.deleteBtn} onPress={() => handleDeleteLeader(leader)}>
+                            <Text style={styles.btnText}>🗑 Delete</Text>
+                          </TouchableOpacity>
+                          <TouchableOpacity style={styles.editBtn} onPress={() => handleOpenEditLeader(leader)}>
+                            <Text style={styles.btnText}>✏ Edit</Text>
+                          </TouchableOpacity>
+                          <TouchableOpacity
+                            style={[styles.presentBtn, { backgroundColor: '#059669' }]}
+                            onPress={() => handleOpenAddMemberForLeader(leader)}
+                          >
+                            <Text style={styles.btnText}>+ Add Member</Text>
+                          </TouchableOpacity>
+                        </View>
+
+                        {/* OPEN / CLOSE para makita ang members */}
+                        <TouchableOpacity
+                          style={styles.toggleMembersBtn}
+                          onPress={() => setExpandedLeaders(prev => ({ ...prev, [leader.id]: !prev[leader.id] }))}
+                        >
+                          <Text style={styles.countTextRegular}>Members ({members.length})</Text>
+                          <Text style={{ color: theme.textSub, fontSize: 12, fontWeight: 'bold' }}>
+                            {isOpen ? '▲ Close' : '▼ Open'}
+                          </Text>
+                        </TouchableOpacity>
+
+                        {!isOpen ? null : members.length === 0 ? (
+                          <Text style={[styles.infoText, { color: theme.textSub }]}>Wala pang member.</Text>
+                        ) : (
+                          members.map(m => (
+                            <View key={m.id} style={[styles.memberRow, { borderTopColor: theme.border }]}>
+                              <View style={{ flex: 1, paddingRight: 8 }}>
+                                <Text style={[styles.tableCell, { fontWeight: 'bold', color: theme.textMain }]}>{m.name}</Text>
+                                <Text style={[styles.infoText, { color: theme.textSub }]}>
+                                  {m.sex} • {getDisplayAge(m.age, m.birthday)} • {m.birthday}
+                                </Text>
+                                <Text style={[styles.infoText, { color: theme.textSub }]}>{m.address}</Text>
+                              </View>
+                              <View style={{ flexDirection: 'row', gap: 6 }}>
+                                <TouchableOpacity
+                                  style={[styles.smallBtn, { backgroundColor: '#1E3A8A' }]}
+                                  onPress={() => handleOpenEditMember(m)}
+                                >
+                                  <Text style={styles.btnText}>✏</Text>
+                                </TouchableOpacity>
+                                <TouchableOpacity
+                                  style={[styles.smallBtn, { backgroundColor: '#7F1D1D' }]}
+                                  onPress={() => handleDelete(m.id, true)}
+                                >
+                                  <Text style={styles.btnText}>🗑</Text>
+                                </TouchableOpacity>
+                              </View>
+                            </View>
+                          ))
+                        )}
+                      </View>
+                    );
+                  })
+                )}
+              </ScrollView>
+
+              <TouchableOpacity
+                style={[styles.modalCancelBtn, { backgroundColor: '#3B82F6', width: '100%', marginTop: 12, alignItems: 'center' }]}
+                onPress={() => setLeadersModalVisible(false)}
+              >
+                <Text style={[styles.modalCancelText, { color: '#FFF' }]}>Close Leaders</Text>
+              </TouchableOpacity>
+            </View>
+          </View>
+        </Modal>
+
+        {/* ADD/EDIT LEADER MODAL */}
+        <Modal
+          visible={leaderFormVisible}
+          animationType="slide"
+          transparent={true}
+          onRequestClose={handleCancelLeaderForm}
+        >
+          <View style={styles.modalOverlay}>
+            <View style={[styles.modalContent, { backgroundColor: theme.cardBg }]}>
+              <Text style={[styles.modalTitle, { color: theme.textMain }]}>
+                {editLeaderId ? 'Edit Leader' : 'Add New Leader'}
+              </Text>
+
+              <ScrollView showsVerticalScrollIndicator={false}>
+                <Text style={[styles.inputLabel, { color: theme.textSub }]}>Full Name *</Text>
+                <TextInput
+                  style={[styles.inputField, { backgroundColor: theme.inputBg, borderColor: theme.border, color: theme.textMain }]}
+                  placeholder="e.g. Ate Macel"
+                  placeholderTextColor={theme.textSub}
+                  value={lName}
+                  onChangeText={setLName}
+                />
+                <Text style={[styles.infoText, { color: theme.textSub, marginBottom: 10 }]}>
+                  Tip: dapat kapareho ng nakasulat sa Cell Leader ng mga members para lumabas sila sa leader na ito.
+                </Text>
+
+                <Text style={[styles.inputLabel, { color: theme.textSub }]}>Sex</Text>
+                <TextInput
+                  style={[styles.inputField, { backgroundColor: theme.inputBg, borderColor: theme.border, color: theme.textMain }]}
+                  placeholder="e.g. Male / Female"
+                  placeholderTextColor={theme.textSub}
+                  value={lSex}
+                  onChangeText={setLSex}
+                />
+
+                <Text style={[styles.inputLabel, { color: theme.textSub }]}>Age</Text>
+                <TextInput
+                  style={[styles.inputField, { backgroundColor: theme.inputBg, borderColor: theme.border, color: theme.textMain }]}
+                  placeholder="e.g. 25"
+                  placeholderTextColor={theme.textSub}
+                  keyboardType="numeric"
+                  value={lAge}
+                  onChangeText={setLAge}
+                />
+
+                <Text style={[styles.inputLabel, { color: theme.textSub }]}>Birthday</Text>
+                <TouchableOpacity
+                  style={[styles.inputField, { backgroundColor: theme.inputBg, borderColor: theme.border, justifyContent: 'center' }]}
+                  onPress={() => setLeaderDatePickerVisible(true)}
+                >
+                  <Text style={{ color: lBirthday ? theme.textMain : theme.textSub }}>
+                    {lBirthday || 'Select Birthday (Tap here)'}
+                  </Text>
+                </TouchableOpacity>
+
+                {leaderDatePickerVisible && (
+                  <DateTimePicker
+                    value={lSelectedDate}
+                    mode="date"
+                    display="default"
+                    onChange={handleLeaderDateChange}
+                  />
+                )}
+
+                <Text style={[styles.inputLabel, { color: theme.textSub }]}>Address</Text>
+                <TextInput
+                  style={[styles.inputField, { backgroundColor: theme.inputBg, borderColor: theme.border, color: theme.textMain }]}
+                  placeholder="e.g. Masbate City"
+                  placeholderTextColor={theme.textSub}
+                  value={lAddress}
+                  onChangeText={setLAddress}
+                />
+
+                <Text style={[styles.inputLabel, { color: theme.textSub }]}>Contact Number</Text>
+                <TextInput
+                  style={[styles.inputField, { backgroundColor: theme.inputBg, borderColor: theme.border, color: theme.textMain }]}
+                  placeholder="e.g. 09xx xxx xxxx"
+                  placeholderTextColor={theme.textSub}
+                  keyboardType="phone-pad"
+                  value={lContact}
+                  onChangeText={setLContact}
+                />
+
+                <View style={styles.modalBtnRow}>
+                  <TouchableOpacity
+                    style={[styles.modalCancelBtn, { backgroundColor: theme.border }]}
+                    onPress={handleCancelLeaderForm}
+                  >
+                    <Text style={styles.modalCancelText}>Cancel</Text>
+                  </TouchableOpacity>
+
+                  <TouchableOpacity style={styles.modalSaveBtn} onPress={handleSaveLeader}>
+                    <Text style={styles.modalSaveText}>Save Leader</Text>
+                  </TouchableOpacity>
+                </View>
+              </ScrollView>
             </View>
           </View>
         </Modal>
@@ -1346,6 +2164,12 @@ const styles = StyleSheet.create({
     paddingVertical: 6,
     borderRadius: 6,
   },
+  undoBtn: {
+    backgroundColor: '#B45309',
+    paddingHorizontal: 10,
+    paddingVertical: 6,
+    borderRadius: 6,
+  },
   activePresentBtn: {
     backgroundColor: '#059669',
   },
@@ -1436,6 +2260,44 @@ const styles = StyleSheet.create({
   modalSaveText: {
     color: '#FFF',
     fontWeight: 'bold',
+  },
+  historySearchInput: {
+    height: 40,
+    borderWidth: 1,
+    borderRadius: 8,
+    paddingHorizontal: 10,
+    marginBottom: 8,
+    fontSize: 13,
+  },
+  historyPrintBtn: {
+    backgroundColor: '#374151',
+    paddingHorizontal: 12,
+    paddingVertical: 6,
+    borderRadius: 6,
+  },
+  historyPrintBtnText: {
+    color: '#FFF',
+    fontSize: 11,
+    fontWeight: 'bold',
+  },
+  toggleMembersBtn: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    marginTop: 12,
+    paddingVertical: 6,
+  },
+  memberRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    paddingVertical: 8,
+    borderTopWidth: 1,
+  },
+  smallBtn: {
+    paddingHorizontal: 10,
+    paddingVertical: 6,
+    borderRadius: 6,
   },
   historyItemCard: {
     flexDirection: 'row',
